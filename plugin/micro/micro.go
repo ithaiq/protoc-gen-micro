@@ -8,7 +8,7 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	pb "github.com/golang/protobuf/protoc-gen-go/descriptor"
-	"github.com/micro/protoc-gen-micro/v2/generator"
+	"github.com/ithaiq/protoc-gen-micro/v2/generator"
 	options "google.golang.org/genproto/googleapis/api/annotations"
 )
 
@@ -98,6 +98,7 @@ func (g *micro) GenerateImports(file *generator.FileDescriptor, imports map[gene
 	g.P(contextPkg, " ", strconv.Quote(path.Join(g.gen.ImportPrefix, contextPkgPath)))
 	g.P(clientPkg, " ", strconv.Quote(path.Join(g.gen.ImportPrefix, clientPkgPath)))
 	g.P(serverPkg, " ", strconv.Quote(path.Join(g.gen.ImportPrefix, serverPkgPath)))
+	g.P(`"os"`)
 	g.P(")")
 	g.P()
 
@@ -179,6 +180,13 @@ func (g *micro) generateService(file *generator.FileDescriptor, service *pb.Serv
 	g.P("}")
 	g.P()
 
+	// mock Client structure.
+	g.P("type ", "mock"+unexport(servAlias), " struct {")
+	g.P("c ", clientPkg, ".Client")
+	g.P("name string")
+	g.P("}")
+	g.P()
+
 	// NewClient factory.
 	g.P("func New", servAlias, " (name string, c ", clientPkg, ".Client) ", servAlias, " {")
 	/*
@@ -189,6 +197,14 @@ func (g *micro) generateService(file *generator.FileDescriptor, service *pb.Serv
 		g.P(`name = "`, serviceName, `"`)
 		g.P("}")
 	*/
+
+	g.P(`if os.Getenv("mock") != "" {`)
+	g.P("return &mock", unexport(servAlias), "{")
+	g.P("c: c,")
+	g.P("name: name,")
+	g.P("}")
+	g.P("}")
+
 	g.P("return &", unexport(servAlias), "{")
 	g.P("c: c,")
 	g.P("name: name,")
@@ -210,6 +226,8 @@ func (g *micro) generateService(file *generator.FileDescriptor, service *pb.Serv
 			streamIndex++
 		}
 		g.generateClientMethod(serviceName, servName, serviceDescVar, method, descExpr)
+		//mock
+		g.generateClientMethodMock(serviceName, servName, serviceDescVar, method, descExpr)
 	}
 
 	g.P("// Server API for ", servName, " service")
@@ -355,6 +373,108 @@ func (g *micro) generateClientMethod(reqServ, servName, serviceDescVar string, m
 		g.P("err := ", `c.c.Call(ctx, req, out, opts...)`)
 		g.P("if err != nil { return nil, err }")
 		g.P("return out, nil")
+		g.P("}")
+		g.P()
+		return
+	}
+	streamType := unexport(servAlias) + methName
+	g.P(`req := c.c.NewRequest(c.name, "`, reqMethod, `", &`, inType, `{})`)
+	g.P("stream, err := c.c.Stream(ctx, req, opts...)")
+	g.P("if err != nil { return nil, err }")
+
+	if !method.GetClientStreaming() {
+		g.P("if err := stream.Send(in); err != nil { return nil, err }")
+	}
+
+	g.P("return &", streamType, "{stream}, nil")
+	g.P("}")
+	g.P()
+
+	genSend := method.GetClientStreaming()
+	genRecv := method.GetServerStreaming()
+
+	// Stream auxiliary types and methods.
+	g.P("type ", servName, "_", methName, "Service interface {")
+	g.P("Context() context.Context")
+	g.P("SendMsg(interface{}) error")
+	g.P("RecvMsg(interface{}) error")
+	g.P("Close() error")
+
+	if genSend {
+		g.P("Send(*", inType, ") error")
+	}
+	if genRecv {
+		g.P("Recv() (*", outType, ", error)")
+	}
+	g.P("}")
+	g.P()
+
+	g.P("type ", streamType, " struct {")
+	g.P("stream ", clientPkg, ".Stream")
+	g.P("}")
+	g.P()
+
+	g.P("func (x *", streamType, ") Close() error {")
+	g.P("return x.stream.Close()")
+	g.P("}")
+	g.P()
+
+	g.P("func (x *", streamType, ") Context() context.Context {")
+	g.P("return x.stream.Context()")
+	g.P("}")
+	g.P()
+
+	g.P("func (x *", streamType, ") SendMsg(m interface{}) error {")
+	g.P("return x.stream.Send(m)")
+	g.P("}")
+	g.P()
+
+	g.P("func (x *", streamType, ") RecvMsg(m interface{}) error {")
+	g.P("return x.stream.Recv(m)")
+	g.P("}")
+	g.P()
+
+	if genSend {
+		g.P("func (x *", streamType, ") Send(m *", inType, ") error {")
+		g.P("return x.stream.Send(m)")
+		g.P("}")
+		g.P()
+
+	}
+
+	if genRecv {
+		g.P("func (x *", streamType, ") Recv() (*", outType, ", error) {")
+		g.P("m := new(", outType, ")")
+		g.P("err := x.stream.Recv(m)")
+		g.P("if err != nil {")
+		g.P("return nil, err")
+		g.P("}")
+		g.P("return m, nil")
+		g.P("}")
+		g.P()
+	}
+}
+
+func (g *micro) generateClientMethodMock(reqServ, servName, serviceDescVar string, method *pb.MethodDescriptorProto, descExpr string) {
+	reqMethod := fmt.Sprintf("%s.%s", servName, method.GetName())
+	methName := generator.CamelCase(method.GetName())
+	inType := g.typeName(method.GetInputType())
+	outType := g.typeName(method.GetOutputType())
+
+	servAlias := servName + "Service"
+
+	// strip suffix
+	if strings.HasSuffix(servAlias, "ServiceService") {
+		servAlias = strings.TrimSuffix(servAlias, "Service")
+	}
+
+	g.P("var Mock", method.GetName()+"Rsp", " ", "*"+outType)
+	g.P()
+
+	g.P("func (c *mock", unexport(servAlias), ") ", g.generateClientSignature(servName, method), "{")
+	if !method.GetServerStreaming() && !method.GetClientStreaming() {
+		// TODO: Pass descExpr to Invoke.
+		g.P("return ", "Mock", method.GetName()+"Rsp", ", nil")
 		g.P("}")
 		g.P()
 		return
