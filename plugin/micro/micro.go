@@ -467,14 +467,18 @@ func (g *micro) generateClientMethodMock(reqServ, servName, serviceDescVar strin
 	if strings.HasSuffix(servAlias, "ServiceService") {
 		servAlias = strings.TrimSuffix(servAlias, "Service")
 	}
-
-	g.P("var Mock", method.GetName()+"Rsp", " ", "*"+outType)
+	//fix two same methods will report an error
+	var servMockName string
+	if strings.HasSuffix(servName, "Service") {
+		servMockName = strings.TrimSuffix(servName, "Service")
+	}
+	g.P("var Mock", generator.CamelCase(servMockName)+method.GetName()+"Rsp", " ", "*"+outType)
 	g.P()
 
 	g.P("func (c *mock", unexport(servAlias), ") ", g.generateClientSignature(servName, method), "{")
 	if !method.GetServerStreaming() && !method.GetClientStreaming() {
 		// TODO: Pass descExpr to Invoke.
-		g.P("return ", "Mock", method.GetName()+"Rsp", ", nil")
+		g.P("return ", "Mock", generator.CamelCase(servMockName)+method.GetName()+"Rsp", ", nil")
 		g.P("}")
 		g.P()
 		return
